@@ -89,17 +89,27 @@ public object WatDivQueryExecutor {
             Files.createFile(Paths.get(outputDir.absolutePath, "summary.csv")).toFile()
         )
 
-        log.info("Ready to run benchmark queries!")
+        log.info("Running warm up queries...")
+
+        queriesDir.listFiles().forEach {
+            QueryReader(it).readAll().take(1).forEachIndexed { queryId, query ->
+                if (queryId == 0) {
+                    log.info("Executing a warm up query from ${it.nameWithoutExtension}...")
+                    executeWarmUp(query)
+                }
+
+                Thread.sleep(EXECUTION_TIMEOUT)
+            }
+        }
+
+        log.info("Running benchmark queries...")
 
         queriesDir.listFiles().forEach {
             requestTimingHandler.startGroup(it.nameWithoutExtension)
-            log.info("Started query group {}", it.nameWithoutExtension)
+            log.info("Started query template {}", it.nameWithoutExtension)
 
             QueryReader(it).readAll().forEachIndexed { queryId, query ->
-                if (queryId == 0) {
-                    log.info("Executing a warm up query...")
-                    executeWarmUp(query)
-                } else {
+                if (queryId != 0) {
                     val outputFile = Files.createFile(Paths.get(outputDir.absolutePath,
                         "${it.nameWithoutExtension}-$queryId$OUTPUT_FILE_SUFFIX")).toFile()
 

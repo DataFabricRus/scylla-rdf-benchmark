@@ -1,3 +1,4 @@
+Query template, Time type, Stat type, Time (sec)
 S4,ttfb,min,12.9719
 S4,ttfb,mean,13.6119
 S4,ttfb,std,0.4269

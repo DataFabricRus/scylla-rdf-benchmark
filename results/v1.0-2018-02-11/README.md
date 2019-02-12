@@ -4,7 +4,7 @@ WatDiv 109M.
 
 ## Environment
 
-### Scylla DB
+### ScyllaDB
 
   * version 3.0.2
   * 2 * n1-standard-4
