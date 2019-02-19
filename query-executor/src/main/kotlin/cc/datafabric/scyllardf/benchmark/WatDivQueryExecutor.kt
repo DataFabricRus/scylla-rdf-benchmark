@@ -1,5 +1,13 @@
 package cc.datafabric.scyllardf.benchmark
 
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import org.apache.commons.cli.CommandLine
+import org.apache.commons.cli.DefaultParser
+import org.apache.commons.cli.HelpFormatter
+import org.apache.commons.cli.MissingOptionException
+import org.apache.commons.cli.Options
 import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics
 import org.apache.http.client.config.RequestConfig
 import org.apache.http.client.methods.HttpPost
@@ -11,67 +19,114 @@ import org.apache.http.util.EntityUtils
 import org.slf4j.LoggerFactory
 import java.io.File
 import java.io.FileWriter
+import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Paths
 import java.util.LinkedList
+import kotlin.system.exitProcess
 
 
 public object WatDivQueryExecutor {
 
     private const val OUTPUT_FILE_SUFFIX = ".txt"
     private const val EXECUTION_TIMEOUT = 1000L
+    private const val DEFAULT_POOL_SIZE = 1
+    private const val DEFAULT_ITERATIONS = 10
 
     private val log = LoggerFactory.getLogger(WatDivQueryExecutor::class.java)
 
     private lateinit var client: CloseableHttpClient
 
-    private lateinit var url: String
+    private lateinit var url: URI
+    private var poolSize: Int = DEFAULT_POOL_SIZE
     private lateinit var requestTimingHandler: RequestTimingHandler
 
-    private fun executeWarmUp(query: String) {
+    private fun executeWarmUp(query: String, outputFile: File) {
         val request = HttpPost(url)
         request.entity = StringEntity(query, ContentType.create("application/sparql-query", Charsets.UTF_8))
 
         val response = client.execute(request)
+        val body = EntityUtils.toString(response.entity, Charsets.UTF_8)
+        FileWriter(outputFile).use {
+            it.write(body)
+        }
         EntityUtils.consume(response.entity)
         response.close()
     }
 
-    private fun execute(queryId: String, query: String, outputFile: File) {
+    object Cli {
+        private val options: Options = Options().apply {
+            addRequiredOption("u", "url", true, "SPARQL endpoint")
+            addRequiredOption("q", "queries", true, "directory where each file represent one query")
+            addRequiredOption("o", "output", true, "directory where results should be stored")
+            addOption("N", "pool size")
+        }
+
+        private val parser = DefaultParser()
+
+        fun parse(args: Array<String>): CommandLine = parser.parse(options, args)
+
+        fun printHelp() = HelpFormatter().printHelp(this.javaClass.simpleName, options)
+    }
+
+    // TODO use production-ready module to acquire stats (JMX? kotlin-statistics?)
+    private fun execute(queryId: String, query: String) {
         val request = HttpPost(url)
         request.entity = StringEntity(query, ContentType.create("application/sparql-query", Charsets.UTF_8))
+        val stats = mutableListOf<Pair<Long, Long>>()
+        runBlocking {
+            repeat(poolSize) {
+                GlobalScope.launch {
+                    // Time to first byte
+                    val ttfbs = mutableListOf<Long>()
 
-        val start = System.nanoTime()
-        client.execute(request).use { response ->
-            val ttfb = System.nanoTime() - start
+                    // Time to last byte
+                    val ttlbs = mutableListOf<Long>()
+                    repeat(DEFAULT_ITERATIONS) {
+                        val start = System.nanoTime()
+                        client.execute(request).also {
+                            ttfbs.add(System.nanoTime() - start)
 
-            val body = EntityUtils.toString(response.entity, Charsets.UTF_8)
-            val ttlb = System.nanoTime() - start
+                            // wait until all bytes are received
+                            it.entity.content.readBytes()
 
-            FileWriter(outputFile).use {
-                it.write(body)
+                            ttlbs.add(System.nanoTime() - start)
+                        }
+                    }
+                    stats[it] = Pair(ttfbs.sum() / ttfbs.size, ttlbs.sum() / ttlbs.size)
+                }
             }
-
-            requestTimingHandler.handle(queryId, ttfb, ttlb)
         }
+        requestTimingHandler.handle(
+            queryId,
+            stats.map { it.first }.sum() / poolSize,
+            stats.map { it.second }.sum() / poolSize
+        )
     }
 
     @JvmStatic
-    public fun main(args: Array<String>) {
-        if (args.size < 3) {
-            throw IllegalArgumentException("Requires at least 3 arguments: `url`, `queries` and `output` locations!")
+    public fun main(args: Array<String>) = runBlocking {
+        val cmd: CommandLine
+        try {
+            cmd = Cli.parse(args)
+        } catch (ex: MissingOptionException) {
+            Cli.printHelp()
+            exitProcess(1)
+        }
+        url = URI.create(cmd.getOptionValue("u"))
+        val queriesDir = File(cmd.getOptionValue("q"))
+        val outputDir = File(cmd.getOptionValue("o"))
+        if (cmd.hasOption("N")) {
+            poolSize = cmd.getOptionValue("N").toInt()
         }
 
-        url = args[0]
-
-        val queriesDir = File(args[1])
-        val outputDir = File(args[2])
 
         if (!queriesDir.isDirectory || !queriesDir.exists()) {
             throw IllegalArgumentException("The queries directory doesn't exists!")
         }
 
         if (!outputDir.exists()) {
+            println("Output directory is missing. Creating ${outputDir.absolutePath} ...")
             outputDir.mkdir()
         }
 
@@ -80,6 +135,7 @@ public object WatDivQueryExecutor {
             .setConnectionRequestTimeout(0)
             .setSocketTimeout(0)
             .build()
+
         client = HttpClients.custom()
             .setDefaultRequestConfig(requestConfig)
             .build()
@@ -95,7 +151,13 @@ public object WatDivQueryExecutor {
             QueryReader(it).readAll().take(1).forEachIndexed { queryId, query ->
                 if (queryId == 0) {
                     log.info("Executing a warm up query from ${it.nameWithoutExtension}...")
-                    executeWarmUp(query)
+                    val outputFile = Files.createFile(
+                        Paths.get(
+                            outputDir.absolutePath,
+                            "${it.nameWithoutExtension}-$queryId$OUTPUT_FILE_SUFFIX"
+                        )
+                    ).toFile()
+                    executeWarmUp(query, outputFile)
                 }
 
                 Thread.sleep(EXECUTION_TIMEOUT)
@@ -110,11 +172,8 @@ public object WatDivQueryExecutor {
 
             QueryReader(it).readAll().forEachIndexed { queryId, query ->
                 if (queryId != 0) {
-                    val outputFile = Files.createFile(Paths.get(outputDir.absolutePath,
-                        "${it.nameWithoutExtension}-$queryId$OUTPUT_FILE_SUFFIX")).toFile()
-
                     log.info("Executing {}th query...", queryId)
-                    execute(queryId.toString(), query, outputFile)
+                    execute(queryId.toString(), query)
                 }
 
                 Thread.sleep(EXECUTION_TIMEOUT)
