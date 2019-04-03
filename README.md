@@ -8,7 +8,7 @@ The ingestion included the bulk loading RDF into all indexes in ScyllaDB, the fu
 ScyllaDB had 2 nodes with the following characteristics:
 
   * n1-standard-16,
-  * 2 * Local SSD (375 Gb each)
+  * 2 * Local SSD with NVMe (375 Gb each)
   
 The pipelines were run on Google Dataflow:
 
@@ -16,7 +16,7 @@ The pipelines were run on Google Dataflow:
   * 1 * connection to ScyllaDB per machine,
   * 8192 * parallel requests per a connection.
 
-The ingestion pipelines run ~16 min and loaded 109,836,664 RDF triples which gives as ~114k triples/sec. 
+The ingestion pipelines run ~16 min and loaded 109,836,664 RDF triples which gives ~114k triples/sec. 
 
 ## Queries: [WatDiv](https://dsg.uwaterloo.ca/watdiv/) 109M triples
 
